@@ -5495,13 +5495,22 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
                     at.depth = n.has_depth ? (Texture*)1 : nullptr;   // (never read through: whether there is one)
                     for (int k = 0; k < 8; k++) at.color_format[k] = (VkFormat)n.color_format[k];
                     const VkPipeline made = build_graphics(*p, n.s, at, (VkPrimitiveTopology)n.topo);
-                    std::lock_guard lk(note_mu);
-                    auto it = pipelines.find(n.key);
-                    if (it == pipelines.end()) {
-                        auto e = std::make_unique<PipeEntry>();
-                        e->pipeline = made;
-                        e->ready.store(true, std::memory_order_release);
-                        pipelines.emplace(n.key, std::move(e));
+                    // (once the game has gone on, the map is the game's: graphics_pipeline looks it up and adds to it under
+                    // ParLock, or no lock with one replay thread, never note_mu, so an entry put in from here raced it (a rehash
+                    // under a lookup). Let go, as a compute pipeline is: the driver's cache has it now, and the game's own build
+                    // gets it from there. pre->mu held over the insert: the game cannot go on halfway through it)
+                    std::lock_guard lk_pre(pre->mu);
+                    if (pre->abandoned) {
+                        if (made) vkDestroyPipeline(dev.device, made, nullptr);
+                    } else {
+                        std::lock_guard lk(note_mu);
+                        auto it = pipelines.find(n.key);
+                        if (it == pipelines.end()) {
+                            auto e = std::make_unique<PipeEntry>();
+                            e->pipeline = made;
+                            e->ready.store(true, std::memory_order_release);
+                            pipelines.emplace(n.key, std::move(e));
+                        }
                     }
                 }
             }
